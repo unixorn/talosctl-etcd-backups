@@ -8,5 +8,5 @@ RUN apt update && \
 RUN update-ca-certificates
 
 COPY tal-backup-etcd /usr/local/bin/tal-backup-etcd
-RUN chmod 755 /usr/local/bin/tal-backup-etcd
 RUN curl -sL https://talos.dev/install | sh
+RUN chmod 755 /usr/local/bin/tal-backup-etcd
