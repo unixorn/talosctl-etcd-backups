@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+#
+# tal-backup-etcd
+#
+# Back up the talos cluster's etcd cluster
+#
+# Copyright 2026, Joe Block <jpb@unixorn.net>
+
+set -o pipefail
+if [[ -n "$DEBUG" ]]; then
+  # shellcheck disable=SC2086
+  if [[ "$(echo $DEBUG | tr '[:upper:]' '[:lower:]')" == "verbose" ]]; then
+    set -x
+  fi
+fi
+
+function echo-stderr() {
+  printf '%s
+' "$1" >&2  ## Send message to stderr. Exclude >&2 if you don't want it that way.
+}
+
+function debug() {
+  if [[ -n "$DEBUG" ]]; then
+    echo-stderr "$@"
+  fi
+}
+
+function verbose() {
+  if [[ -n "$VERBOSE" ]]; then
+    echo "$@"
+  fi
+}
+
+function fail() {
+  echo-stderr "$1"
+  exit "${2-1}"  ## Return a code specified by $2 or 1 by default.
+}
+
+function has() {
+  # Check if a command is in $PATH
+  which "$@" > /dev/null 2>&1
+}
+
+function get-default-settings() {
+    BACKUP_D=${BACKUP_D:-'./talos-backups'}
+    KEEP_DAYS=${KEEP_DAYS:-'30'}
+    PRUNE_OK="true"
+    TALOSCONFIG=${TALOSCONFIG:-"$HOME/.talos/config"}
+}
+
+function check-dependency() {
+  if ! (builtin command -V "$1" >/dev/null 2>&1); then
+    fail "missing dependency: can't find $1 in your PATH"
+  fi
+}
+
+function check-dependencies() {
+  verbose "Checking dependencies..."
+  # shellcheck disable=SC2041
+  # Placeholders for whatever programs you really need
+  for dep in "$@"
+  do
+    if ! has "$dep"; then
+      fail "Can't find $dep in your $PATH"
+    else
+      debug "- Found $dep"
+    fi
+  done
+}
+
+function my-name() {
+  basename "$0"
+}
+
+function usage() {
+  echo "Usage: $(my-name)"
+  echo "  --backup-directory /path/to/directory"
+  echo "  --backup-filename - What filename to write in the backup directory. Defaults to etcd.snapshot.$(date +%Y-%m-%d-%H%M)"
+  echo "  --controlplane-node IP_OR_DNS_OF_CONTROLPLANE_NODE"
+  echo "  --keep-days (default 30) how many days of backup to keep"
+  echo "  --no-prune - Disable stale backup pruning"
+  echo "  --talosconfig /path/to/talosconfig"
+  echo "  --verbose"
+}
+
+function pingable() {
+  verbose "Checking connectivity to $*"
+  # shellcheck disable=SC2068
+  if ! ping -c 5 $@ > /dev/null 2>&1; then
+    debug "Could not ping $*"
+    return 1
+  else
+    return 0
+  fi
+}
+
+function dump-settings() {
+  verbose "BACKUP_D: ${BACKUP_D}"
+  verbose "BACKUP_F: ${BACKUP_F}"
+  verbose "CONTROLPLANE_IP: ${CONTROLPLANE_IP}"
+  verbose "KEEP_DAYS: ${KEEP_DAYS}"
+  verbose "PRUNE_OK: ${PRUNE_OK}"
+  verbose "TALOSCONFIG: ${TALOSCONFIG}"
+}
+
+function squish() {
+  if has pbzip2; then
+    pbzip2 -9vr "$1"
+  else
+    bzip2 -9v "$1"
+  fi
+}
+
+function backup-etcd() {
+  mkdir -p "${BACKUP_D}" || fail "Can't make ${BACKUP_D}"
+  if [[ -z "${CONTROLPLANE_IP}" ]]; then
+    verbose "Backing up etcd to ${BACKUP_D}/${BACKUP_F}"
+    if ! talosctl --talosconfig "${TALOSCONFIG}" etcd snapshot "${BACKUP_D}/${BACKUP_F}"; then
+      fail "etcd snapshot failed! skipping backup pruning"
+    fi
+  else
+    verbose "Backing up etcd from ${CONTROLPLANE_IP} to ${BACKUP_D}/${BACKUP_F}"
+    if ! pingable "${CONTROLPLANE_IP}";then
+      fail "Can't ping ${CONTROLPLANE_IP}!"
+    fi
+    if ! talosctl --talosconfig "${TALOSCONFIG}" -n "${CONTROLPLANE_IP}" etcd snapshot "${BACKUP_D}/${BACKUP_F}"; then
+      fail "etcd snapshot failed! skipping backup pruning"
+    fi
+  fi
+  squish "${BACKUP_D}/${BACKUP_F}"
+}
+
+function prune-backups() {
+  if [[ "$PRUNE_OK" == "true" ]]; then
+      echo "Pruning stale backups older than ${KEEP_DAYS} days old..."
+      # Delete snapshots older than $KEEP_DAYS days
+      find "${BACKUP_D}" -mtime +"${KEEP_DAYS}" -type f -exec rm -fv '{}' ';'
+  fi
+}
+
+# Placeholders for your script's real dependencies
+check-dependencies bzip2 find talosctl
+get-default-settings
+
+# parse arguments
+
+while :
+do
+  if [[ $# == 0 ]]; then
+    break
+  fi
+  case "$1" in
+    --help | -h)
+      usage
+      exit 0
+      ;;
+    --talosconfig)
+      shift
+      TALOSCONFIG="$1"
+      shift
+      ;;
+    --backup-directory | --backup-dir | --bd )
+      shift
+      BACKUP_D="$1"
+      shift
+      ;;
+    --backup-filename)
+      shift
+      BACKUP_F="$1"
+      shift
+      ;;
+    --controlplane-node | --control-plane-node | --control-plane | --cpn )
+      shift
+      CONTROLPLANE_IP="$1"
+      shift
+      ;;
+    --keep-days | --days)
+      shift
+      KEEP_DAYS="$1"
+      shift
+      ;;
+    --no-prune)
+      PRUNE_OK='false'
+      shift
+      ;;
+    --debug)
+      DEBUG='true'
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN='true'
+      shift
+      ;;
+    --verbose | -v)
+      VERBOSE='true'
+      shift
+      ;;
+    -- )
+      shift;
+      break
+      ;;
+    *)
+      echo-stderr "Unexpected option: $1"
+      usage
+      fail "Invalid CLI argument: '$1'"
+      ;;
+  esac
+done
+
+BACKUP_F=${BACKUP_F:-"etcd.snapshot.$(date +%Y-%m-%d-%H%M)"}
+dump-settings
+if [[ ! -r "${TALOSCONFIG}" ]]; then
+    fail "Can't read ${TALOSCONFIG}!"
+fi
+if [[ -n "$DRY_RUN" ]]; then
+  exit 0
+fi
+
+backup-etcd
+prune-backups
