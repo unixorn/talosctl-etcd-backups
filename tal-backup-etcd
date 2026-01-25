@@ -138,8 +138,13 @@ function prune-backups() {
   fi
 }
 
-# Placeholders for your script's real dependencies
-check-dependencies bzip2 find talosctl
+function run-cluster-health-checks() {
+  echo "Confirming cluster health..."
+  talosctl health
+}
+
+# If you run this after parsing arguments, CLI arguments will get replaced
+# with the defaults
 get-default-settings
 
 # parse arguments
@@ -216,5 +221,8 @@ if [[ -n "$DRY_RUN" ]]; then
   exit 0
 fi
 
+dump-settings
+check-dependencies bzip2 find talosctl
+run-cluster-health-checks
 backup-etcd
 prune-backups
